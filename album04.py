@@ -18,7 +18,6 @@ MAKE_WEBHOOK_URL = 'https://hook.eu2.make.com/iaqn7i7659ktujenbzyh2oa75f4yxycu'
 IMG_DIR = "C:/Users/volko/OneDrive/Desktop/NoCode/img_to_web_2"
 GITHUB_RAW_BASE = "https://raw.githubusercontent.com/NoCode240/telegram-bot-render/main/img_to_web/"
 
-
 os.makedirs(IMG_DIR, exist_ok=True)
 
 channels_to_monitor = ['lady_shopi', 'bottelethon']
@@ -45,6 +44,11 @@ def convert_to_jpg(photo_path):
 
 def git_push():
     try:
+        # 🔧 Авторизація для Render
+        os.system('git config --global user.email "bot@autopush.ai"')
+        os.system('git config --global user.name "AutoPush Bot"')
+        os.system('git remote set-url origin https://ghp_${GH_TOKEN}@github.com/NoCode240/telegram-bot-render.git')
+
         subprocess.run(["git", "add", "."], cwd=IMG_DIR, check=True)
         commit_result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=IMG_DIR)
         if commit_result.returncode != 0:
@@ -80,7 +84,7 @@ def send_to_make(caption, filenames, source, chat_id):
     response = requests.post(MAKE_WEBHOOK_URL, data=data)
     print(f"📤 Відправлено {len(media_links)} JPG → {response.status_code}")
     git_push()
-    cleanup_local_jpgs()  # Очищення JPG після пушу
+    cleanup_local_jpgs()
 
 
 def flush_buffer(chat_id):
