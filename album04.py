@@ -41,6 +41,8 @@ def convert_to_jpg(photo_path):
 
 
 def upload_to_imgbb(jpg_path):
+    if jpg_path.startswith("http"):
+        return jpg_path
     with open(jpg_path, 'rb') as file:
         response = requests.post(
             "https://api.imgbb.com/1/upload",
@@ -143,14 +145,6 @@ async def handle_message(event):
             pending_timers[gid].cancel()
         pending_timers[gid] = Timer(ALBUM_DELAY, flush_album, [gid])
         pending_timers[gid].start()
-        return
-
-    if msg.photo and msg.message:
-        path = await msg.download_media()
-        jpg = convert_to_jpg(path)
-        link = upload_to_imgbb(jpg)
-        if link:
-            send_to_make(msg.message, [link], source, chat_id)
         return
 
     pending_messages.setdefault(chat_id, [])
