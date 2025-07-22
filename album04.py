@@ -1,121 +1,172 @@
 from telethon import TelegramClient, events
-import os
-import requests
 from PIL import Image
-from threading import Timer
-import asyncio
+import os
 import uuid
+import requests
+import asyncio
+from threading import Timer
 
 # === Telegram авторизація
 api_id = 28067897
 api_hash = '58562f6b38ee6197d65fc16de649b238'
-client = TelegramClient('user_session', api_id, api_hash)
 
-# === Make Webhook
+# === Make Webhook і ImgBB API
 MAKE_WEBHOOK_URL = 'https://hook.eu2.make.com/iaqn7i7659ktujenbzyh2oa75f4yxycu'
-
-# === ImgBB API
 IMGBB_API_KEY = '9296c54b2fa1ec1b305118958765026b'
 
-# === Telegram канали
+# === Тимчасова папка
+IMG_DIR = "img_to_web"
+os.makedirs(IMG_DIR, exist_ok=True)
+
 channels_to_monitor = ['lady_shopi', 'bottelethon']
-
-# === Кеш для постів
+pending_messages = {}
+pending_timers = {}
 media_groups = {}
-pending_posts = {}
-timers = {}
-SAVE_DELAY = 30  # секунди
+media_group_chat_map = {}
 
-# === Завантаження JPG на ImgBB
-def upload_to_imgbb(image_path):
-    with open(image_path, "rb") as f:
+BUFFER_DELAY = 30  # секунд
+ALBUM_DELAY = 3  # секунд
+
+client = TelegramClient('user_session', api_id, api_hash)
+client.start()
+main_loop = asyncio.get_event_loop()
+
+
+def convert_to_jpg(photo_path):
+    unique_name = f"{uuid.uuid4().hex}.jpg"
+    output_path = os.path.join(IMG_DIR, unique_name)
+    Image.open(photo_path).convert("RGB").save(output_path, "JPEG")
+    os.remove(photo_path)
+    return output_path
+
+
+def upload_to_imgbb(jpg_path):
+    with open(jpg_path, 'rb') as file:
         response = requests.post(
             "https://api.imgbb.com/1/upload",
             params={"key": IMGBB_API_KEY},
-            files={"image": f}
+            files={"image": file}
         )
+    os.remove(jpg_path)
     if response.status_code == 200:
         return response.json()['data']['url']
     else:
-        print("❌ ImgBB upload failed:", response.text)
+        print("❌ ImgBB upload failed")
         return None
 
-# === Збереження картинки у JPG
-def save_as_jpg(file, output_path):
-    image = Image.open(file)
-    rgb_image = image.convert('RGB')
-    rgb_image.save(output_path, "JPEG")
 
-# === Відправка в Make
-def send_to_make(post_data):
-    try:
-        response = requests.post(MAKE_WEBHOOK_URL, json=post_data)
-        print(f"📤 Відправлено: {response.status_code} {response.text}")
-    except Exception as e:
-        print("❌ Помилка при надсиланні в Make:", e)
-
-# === Обробка готового посту
-async def finalize_post(group_id):
-    post = pending_posts.pop(group_id, {})
-    timers.pop(group_id, None)
-
-    if not post.get("photos") and not post.get("caption"):
-        return  # пустий пост
-
-    media_urls = []
-    for photo_path in post.get("photos", []):
-        url = upload_to_imgbb(photo_path)
-        if url:
-            media_urls.append(url)
-
-    payload = {
-        "chat_id": post.get("chat_id"),
-        "caption": post.get("caption", ""),
-        "source": post.get("source", ""),
-        "media": media_urls
+def send_to_make(caption, image_links, source, chat_id):
+    data = {
+        'caption': caption or '',
+        'source': source or '',
+        'chat_id': str(chat_id),
     }
+    for i, url in enumerate(image_links):
+        data[f'media[{i}]'] = url
+    response = requests.post(MAKE_WEBHOOK_URL, data=data)
+    print(f"📤 Відправлено {len(image_links)} JPG → {response.status_code}")
 
-    send_to_make(payload)
 
-# === Запуск таймера очікування
-def start_timer(group_id):
-    if group_id in timers:
-        timers[group_id].cancel()
-    timers[group_id] = Timer(SAVE_DELAY, lambda: asyncio.run(finalize_post(group_id)))
-    timers[group_id].start()
+def flush_buffer(chat_id):
+    messages = pending_messages.pop(chat_id, [])
+    pending_timers.pop(chat_id, None)
 
-# === Обробка повідомлення
-@client.on(events.NewMessage(chats=channels_to_monitor))
-async def handler(event):
-    msg = event.message
-    group_id = msg.grouped_id or str(uuid.uuid4())
+    captions = []
+    image_links = []
+    source = None
 
-    if group_id not in pending_posts:
-        pending_posts[group_id] = {
-            "photos": [],
-            "caption": "",
-            "source": f"https://t.me/{event.chat.username}" if event.chat else "",
-            "chat_id": event.chat_id
-        }
+    for mtype, content in messages:
+        if mtype == 'text':
+            captions.append(content['text'])
+            source = content['source']
+        elif mtype == 'photo':
+            link = upload_to_imgbb(content['path'])
+            if link:
+                image_links.append(link)
+                source = content['source']
 
-    # === Якщо це фото
-    if msg.photo:
-        file_path = f"temp_{uuid.uuid4().hex}.jpg"
-        await msg.download_media(file_path)
-        save_as_jpg(file_path, file_path)
-        pending_posts[group_id]["photos"].append(file_path)
+    full_caption = "\n".join(captions).strip()
+    send_to_make(full_caption, image_links, source, chat_id)
 
-    # === Якщо це текст
-    if msg.text and not msg.media:
-        pending_posts[group_id]["caption"] = msg.text
 
-    # === Якщо фото і текст в одному — відправляємо відразу
-    if msg.photo and msg.text:
-        await finalize_post(group_id)
+async def flush_album_async(grouped_id):
+    messages = media_groups.pop(grouped_id, [])
+    chat_id = media_group_chat_map.pop(grouped_id)
+    captions = []
+    image_links = []
+    source = None
+
+    for msg in messages:
+        if not source:
+            chat = await msg.get_chat()
+            source = f"https://t.me/{chat.username}" if chat and chat.username else None
+        if msg.message:
+            captions.append(msg.message)
+        if msg.photo:
+            path = await msg.download_media()
+            jpg = convert_to_jpg(path)
+            link = upload_to_imgbb(jpg)
+            if link:
+                image_links.append(link)
+
+    full_caption = "\n".join(captions).strip()
+
+    if full_caption:
+        send_to_make(full_caption, image_links, source, chat_id)
     else:
-        start_timer(group_id)
+        pending_messages.setdefault(chat_id, [])
+        for link in image_links:
+            pending_messages[chat_id].append(('photo', {'path': link, 'source': source, 'chat_id': chat_id}))
 
-# === Старт клієнта
+        if chat_id in pending_timers:
+            pending_timers[chat_id].cancel()
+        pending_timers[chat_id] = Timer(BUFFER_DELAY, flush_buffer, [chat_id])
+        pending_timers[chat_id].start()
+
+
+def flush_album(grouped_id):
+    asyncio.run_coroutine_threadsafe(flush_album_async(grouped_id), main_loop)
+
+
+@client.on(events.NewMessage(chats=channels_to_monitor))
+async def handle_message(event):
+    msg = event.message
+    chat = await event.get_chat()
+    chat_id = msg.chat_id
+    source = f"https://t.me/{chat.username}" if chat and chat.username else None
+
+    if msg.grouped_id:
+        gid = msg.grouped_id
+        media_groups.setdefault(gid, []).append(msg)
+        media_group_chat_map[gid] = chat_id
+        if gid in pending_timers:
+            pending_timers[gid].cancel()
+        pending_timers[gid] = Timer(ALBUM_DELAY, flush_album, [gid])
+        pending_timers[gid].start()
+        return
+
+    if msg.photo and msg.message:
+        path = await msg.download_media()
+        jpg = convert_to_jpg(path)
+        link = upload_to_imgbb(jpg)
+        if link:
+            send_to_make(msg.message, [link], source, chat_id)
+        return
+
+    pending_messages.setdefault(chat_id, [])
+
+    if msg.photo:
+        path = await msg.download_media()
+        jpg = convert_to_jpg(path)
+        pending_messages[chat_id].append(('photo', {'path': jpg, 'source': source, 'chat_id': chat_id}))
+    elif msg.message:
+        pending_messages[chat_id].append(('text', {'text': msg.message, 'source': source, 'chat_id': chat_id}))
+
+    if chat_id in pending_timers:
+        pending_timers[chat_id].cancel()
+    pending_timers[chat_id] = Timer(BUFFER_DELAY, flush_buffer, [chat_id])
+    pending_timers[chat_id].start()
+
+
 print("🤖 Бот запущено. Слухає:", channels_to_monitor)
-client.start()
 client.run_until_disconnected()
