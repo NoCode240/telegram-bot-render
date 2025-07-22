@@ -15,7 +15,7 @@ api_hash = '58562f6b38ee6197d65fc16de649b238'
 MAKE_WEBHOOK_URL = 'https://hook.eu2.make.com/iaqn7i7659ktujenbzyh2oa75f4yxycu'
 
 # === Шляхи
-IMG_DIR = "C:/Users/volko/OneDrive/Desktop/NoCode/img_to_web_2"
+IMG_DIR = "img_to_web"
 GITHUB_RAW_BASE = "https://raw.githubusercontent.com/NoCode240/telegram-bot-render/main/img_to_web/"
 
 os.makedirs(IMG_DIR, exist_ok=True)
