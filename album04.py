@@ -97,11 +97,16 @@ def flush_buffer(chat_id):
             captions.append(content['text'])
             source = content['source']
         elif mtype == 'photo':
-            link, file_id = upload_to_imagekit(content['path'])
-            if link:
-                image_links.append(link)
-                file_ids.append(file_id)
-                source = content['source']
+            path = content['path']
+            if path.startswith("http"):  # Якщо вже готове посилання
+                image_links.append(path)
+                file_ids.append(content.get('file_id', ''))
+            else:
+                link, file_id = upload_to_imagekit(path)
+                if link:
+                    image_links.append(link)
+                    file_ids.append(file_id)
+                    source = content['source']
 
     full_caption = "\n".join(captions).strip()
     send_to_make(full_caption, image_links, source, chat_id, file_ids)
@@ -136,7 +141,12 @@ async def flush_album_async(grouped_id):
     else:
         pending_messages.setdefault(chat_id, [])
         for link, fid in zip(image_links, file_ids):
-            pending_messages[chat_id].append(('photo', {'path': link, 'source': source, 'chat_id': chat_id, 'file_id': fid}))
+            pending_messages[chat_id].append(('photo', {
+                'path': link,
+                'source': source,
+                'chat_id': chat_id,
+                'file_id': fid
+            }))
 
         if chat_id in pending_timers:
             pending_timers[chat_id].cancel()
@@ -170,9 +180,17 @@ async def handle_message(event):
     if msg.photo:
         path = await msg.download_media()
         jpg = convert_to_jpg(path)
-        pending_messages[chat_id].append(('photo', {'path': jpg, 'source': source, 'chat_id': chat_id}))
+        pending_messages[chat_id].append(('photo', {
+            'path': jpg,
+            'source': source,
+            'chat_id': chat_id
+        }))
     elif msg.message:
-        pending_messages[chat_id].append(('text', {'text': msg.message, 'source': source, 'chat_id': chat_id}))
+        pending_messages[chat_id].append(('text', {
+            'text': msg.message,
+            'source': source,
+            'chat_id': chat_id
+        }))
 
     if chat_id in pending_timers:
         pending_timers[chat_id].cancel()
