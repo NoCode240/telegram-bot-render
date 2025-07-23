@@ -5,14 +5,18 @@ import uuid
 import requests
 import asyncio
 from threading import Timer
+import base64
 
 # === Telegram авторизація
 api_id = 28067897
 api_hash = '58562f6b38ee6197d65fc16de649b238'
 
-# === Make Webhook і ImgBB API
+# === Make Webhook і ImageKit API
 MAKE_WEBHOOK_URL = 'https://hook.eu2.make.com/iaqn7i7659ktujenbzyh2oa75f4yxycu'
-IMGBB_API_KEY = '9296c54b2fa1ec1b305118958765026b'
+IMAGEKIT_PUBLIC_KEY = 'public_6CVorz+RpBoV5k4VIJLGiicMkSs='
+IMAGEKIT_PRIVATE_KEY = 'private_GDlyrxDMWN7A4NHlnGBD+XsXTbQ='
+IMAGEKIT_ENDPOINT = 'https://upload.imagekit.io/api/v1/files/upload'
+IMAGEKIT_URL_PREFIX = 'https://ik.imagekit.io/vj6pggssyt/'  # заміни на свій ID, якщо інший
 
 # === Тимчасова папка
 IMG_DIR = "img_to_web"
@@ -35,37 +39,47 @@ main_loop = asyncio.get_event_loop()
 def convert_to_jpg(photo_path):
     unique_name = f"{uuid.uuid4().hex}.jpg"
     output_path = os.path.join(IMG_DIR, unique_name)
-    Image.open(photo_path).convert("RGB").save(output_path, "JPEG")
+    Image.open(photo_path).convert("RGB").save(output_path, "JPEG", optimize=True)
     os.remove(photo_path)
     return output_path
 
 
-def upload_to_imgbb(jpg_path):
-    if jpg_path.startswith("http"):
-        return jpg_path
+def upload_to_imagekit(jpg_path):
     with open(jpg_path, 'rb') as file:
-        response = requests.post(
-            "https://api.imgbb.com/1/upload",
-            params={"key": IMGBB_API_KEY},
-            files={"image": file}
-        )
+        file_data = file.read()
+
+    filename = os.path.basename(jpg_path)
+    auth_header = base64.b64encode((IMAGEKIT_PRIVATE_KEY + ":").encode()).decode()
+
+    response = requests.post(
+        IMAGEKIT_ENDPOINT,
+        headers={
+            "Authorization": f"Basic {auth_header}"
+        },
+        files={"file": (filename, file_data, "image/jpeg")},
+        data={"fileName": filename}
+    )
+
     os.remove(jpg_path)
+
     if response.status_code == 200:
-        return response.json()['data']['url']
+        json_data = response.json()
+        return json_data["url"], json_data["fileId"]
     else:
-        print("❌ ImgBB upload failed")
-        return None
+        print("❌ ImageKit upload failed:", response.text)
+        return None, None
 
 
-def send_to_make(caption, image_links, source, chat_id):
+def send_to_make(caption, image_links, source, chat_id, file_ids):
     data = {
         'caption': caption or '',
         'source': source or '',
         'chat_id': str(chat_id),
+        'media': image_links,
+        'file_ids': file_ids
     }
-    for i, url in enumerate(image_links):
-        data[f'media[{i}]'] = url
-    response = requests.post(MAKE_WEBHOOK_URL, data=data)
+
+    response = requests.post(MAKE_WEBHOOK_URL, json=data)
     print(f"📤 Відправлено {len(image_links)} JPG → {response.status_code}")
 
 
@@ -75,6 +89,7 @@ def flush_buffer(chat_id):
 
     captions = []
     image_links = []
+    file_ids = []
     source = None
 
     for mtype, content in messages:
@@ -82,13 +97,14 @@ def flush_buffer(chat_id):
             captions.append(content['text'])
             source = content['source']
         elif mtype == 'photo':
-            link = upload_to_imgbb(content['path'])
+            link, file_id = upload_to_imagekit(content['path'])
             if link:
                 image_links.append(link)
+                file_ids.append(file_id)
                 source = content['source']
 
     full_caption = "\n".join(captions).strip()
-    send_to_make(full_caption, image_links, source, chat_id)
+    send_to_make(full_caption, image_links, source, chat_id, file_ids)
 
 
 async def flush_album_async(grouped_id):
@@ -96,6 +112,7 @@ async def flush_album_async(grouped_id):
     chat_id = media_group_chat_map.pop(grouped_id)
     captions = []
     image_links = []
+    file_ids = []
     source = None
 
     for msg in messages:
@@ -107,18 +124,19 @@ async def flush_album_async(grouped_id):
         if msg.photo:
             path = await msg.download_media()
             jpg = convert_to_jpg(path)
-            link = upload_to_imgbb(jpg)
+            link, file_id = upload_to_imagekit(jpg)
             if link:
                 image_links.append(link)
+                file_ids.append(file_id)
 
     full_caption = "\n".join(captions).strip()
 
     if full_caption:
-        send_to_make(full_caption, image_links, source, chat_id)
+        send_to_make(full_caption, image_links, source, chat_id, file_ids)
     else:
         pending_messages.setdefault(chat_id, [])
-        for link in image_links:
-            pending_messages[chat_id].append(('photo', {'path': link, 'source': source, 'chat_id': chat_id}))
+        for link, fid in zip(image_links, file_ids):
+            pending_messages[chat_id].append(('photo', {'path': link, 'source': source, 'chat_id': chat_id, 'file_id': fid}))
 
         if chat_id in pending_timers:
             pending_timers[chat_id].cancel()
